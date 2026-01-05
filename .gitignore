@@ -13,3 +13,5 @@ yarn-error.log*
 # Build
 dist/
 build/
+
+error.log
