@@ -17,6 +17,10 @@ async function login() {
     totp
   );
 
+    smartApi.setAccessToken(sessionData.data.jwtToken);
+
+    //console.log("SmartAPI instance keys:", Object.keys(smartApi));
+
   return sessionData;
 }
 
