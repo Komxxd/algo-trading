@@ -2,19 +2,20 @@ const express = require("express");
 const router = express.Router();
 const marketService = require("../services/market.service");
 
-router.get("/ltp", async (req, res) => {
+router.post("/ltp", async (req, res) => {
   try {
-    const { exchange, tradingsymbol, symboltoken } = req.query;
+    const { exchange, tradingsymbol, symboltoken } = req.body;
 
-    if (!exchange || !symboltoken) {
+    if (!exchange || !tradingsymbol || !symboltoken) {
       return res.status(400).json({
         success: false,
-        message: "exchange, tradingsymbol and symboltoken are required",
+        message: "exchange, tradingsymbol, symboltoken required",
       });
     }
 
     const ltp = await marketService.getLTP({
       exchange,
+      tradingsymbol,
       symboltoken,
     });
 
