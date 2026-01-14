@@ -1,7 +1,18 @@
-const API_BASE = "http://localhost:5000/api";
+import { io } from "socket.io-client";
+
+const API_BASE = "http://localhost:5001/api";
+
+let socket = null;
+
+export function initSocket() {
+  if (!socket) {
+    socket = io("http://localhost:5001");
+  }
+  return socket;
+}
 
 export async function loginBackend() {
-  const res = await fetch("http://localhost:5000/api/auth/login", {
+  const res = await fetch("http://localhost:5001/api/auth/login", {
     method: "POST",
   });
   return res.json();
@@ -16,7 +27,7 @@ export async function searchInstruments({ query, exchange, type }) {
   if (type) params.append("type", type);
 
   const res = await fetch(
-    `http://localhost:5000/api/instruments/search?${params.toString()}`
+    `http://localhost:5001/api/instruments/search?${params.toString()}`
   );
 
   return res.json();
@@ -37,8 +48,17 @@ export async function getOptionChain({ symbol, exchange, expiry }) {
   if (expiry) params.append("expiry", expiry);
 
   const res = await fetch(
-    `http://localhost:5000/api/options/chain?${params.toString()}`
+    `http://localhost:5001/api/options/chain?${params.toString()}`
   );
+  return res.json();
+}
+
+export async function subscribeToTokens({ exchangeType, tokens }) {
+  const res = await fetch(`${API_BASE}/market-socket/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ exchangeType, tokens }),
+  });
   return res.json();
 }
 

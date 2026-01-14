@@ -34,9 +34,15 @@ function getOptionChain({ symbol, exchange, expiry }) {
   }
 
   // Determine expiry
+  // Filter out expired dates
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
   const expiries = [
     ...new Set(options.map((o) => o.expiry).filter(Boolean)),
-  ].sort(sortExpiry);
+  ]
+    .filter(d => new Date(d) >= today)
+    .sort(sortExpiry);
 
   const selectedExpiry = expiry || expiries[0];
 
@@ -49,7 +55,8 @@ function getOptionChain({ symbol, exchange, expiry }) {
   const chainMap = {};
 
   for (const opt of expiryOptions) {
-    const strike = Number(opt.strike);
+    // SmartAPI strike prices are in Paise (x100), normalize to Rupee
+    const strike = Number(opt.strike) / 100;
 
     if (!chainMap[strike]) {
       chainMap[strike] = {
@@ -74,6 +81,7 @@ function getOptionChain({ symbol, exchange, expiry }) {
   return {
     underlying: symbol,
     expiry: selectedExpiry,
+    expiries,
     chain,
   };
 }

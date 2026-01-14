@@ -1,17 +1,61 @@
-import { useState } from "react";
-import { loginBackend, searchInstruments, getLTP } from "./api";
+import { useState, useEffect, useRef } from "react";
+import { loginBackend, searchInstruments, getLTP, initSocket, subscribeToTokens } from "./api";
 import OptionChain from "./OptionChain";
 
 function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
+  const [watchlist, setWatchlist] = useState([]); // Array of added instruments
+  const [livePrices, setLivePrices] = useState({}); // Map: token -> price
+
   const [selected, setSelected] = useState(null);
   const [searchType, setSearchType] = useState("EQUITY");
-  const [ltp, setLtp] = useState(null);
+  const [ltp, setLtp] = useState(null); // Selected instrument LTP (can be derived from livePrices too, but kept for standalone logic if needed)
   const [showOptionChain, setShowOptionChain] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const socketRef = useRef(null);
+
+  useEffect(() => {
+    if (loggedIn) {
+      const socket = initSocket();
+      socketRef.current = socket;
+
+      socket.on("connect", () => {
+        console.log("Socket connected");
+        // Re-subscribe to everything in watchlist on reconnect?
+        // Ideally yes, but simpler logic for now.
+      });
+
+      socket.on("tick", (data) => {
+        // console.log("Tick", data);
+        const token = data.token?.replace(/"/g, ''); // Remove quotes if present
+        const rawPrice = Number(data.last_traded_price || data.ltp);
+
+        if (token && !isNaN(rawPrice)) {
+          const price = rawPrice / 100;
+
+          // Update central price map
+          setLivePrices(prev => ({
+            ...prev,
+            [token]: price
+          }));
+
+          // Update selected LTP if it matches
+          if (selected && selected.token === token) {
+            setLtp(price);
+          }
+        }
+      });
+
+      return () => {
+        socket.off("tick");
+        socket.off("connect");
+      };
+    }
+  }, [loggedIn, selected]);
 
   function normalizeUnderlying(inst) {
     if (inst.name === "NIFTY") return "NIFTY";
@@ -25,8 +69,6 @@ function App() {
     setError(null);
     try {
       const res = await loginBackend();
-      console.log("LOGIN RESPONSE:", res);
-
       if (res.success) {
         setLoggedIn(true);
         setError(null);
@@ -42,25 +84,13 @@ function App() {
 
   async function handleSearch() {
     if (!query.trim()) return;
-    
     setLoading(true);
     setError(null);
     try {
-      const exchange =
-        searchType === "OPTIONS" || searchType === "FUTURES"
-          ? "NFO"
-          : "NSE";
-
-      const res = await searchInstruments({
-        query,
-        exchange,
-        type: searchType,
-      });
-
+      const exchange = searchType === "OPTIONS" || searchType === "FUTURES" ? "NFO" : "NSE";
+      const res = await searchInstruments({ query, exchange, type: searchType });
       setResults(res.data || []);
-      if ((res.data || []).length === 0) {
-        setError("No instruments found");
-      }
+      if ((res.data || []).length === 0) setError("No instruments found");
     } catch (err) {
       setError("Search error: " + err.message);
     } finally {
@@ -68,305 +98,248 @@ function App() {
     }
   }
 
-  async function handleSelect(inst) {
-    setSelected(inst);
-    setLtp(null);
-    setLoading(true);
-    setError(null);
-    
+  async function addToWatchlist(inst) {
+    // Check if already exists
+    if (watchlist.find(w => w.token === inst.token)) return;
+
+    const newWatchlist = [...watchlist, inst];
+    setWatchlist(newWatchlist);
+
+    // Subscribe to live data
+    if (loggedIn) {
+      try {
+        let exchCode = 1;
+        if (inst.exch_seg === "NSE") exchCode = 1;
+        else if (inst.exch_seg === "NFO") exchCode = 2;
+        else if (inst.exch_seg === "BSE") exchCode = 3;
+
+        await subscribeToTokens({
+          exchangeType: exchCode,
+          tokens: [inst.token]
+        });
+      } catch (err) {
+        console.error("Failed to subscribe", err);
+      }
+    }
+
+    // Also fetch initial price immediately
     try {
       const res = await getLTP({
         exchange: inst.exch_seg,
         tradingsymbol: inst.symbol,
         symboltoken: inst.token,
       });
-
       const fetched = res.data?.data?.fetched;
-
-      if (fetched && fetched.length > 0) {
-        const row = fetched[0];
-        if (typeof row.ltp === "number") {
-          setLtp(row.ltp);
-        } else {
-          setError("Unexpected LTP format");
-        }
+      if (fetched && fetched.length > 0 && typeof fetched[0].ltp === "number") {
+        const price = fetched[0].ltp / 100;
+        setLivePrices(prev => ({ ...prev, [inst.token]: price }));
       }
-    } catch (err) {
-      setError("Failed to fetch LTP: " + err.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) {/* ignore */ }
+  }
+
+  function removeFromWatchlist(token) {
+    setWatchlist(prev => prev.filter(i => i.token !== token));
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>Algo Trading Platform</h1>
-        <div style={styles.loginSection}>
+    <div className="max-w-[1600px] mx-auto p-6 min-h-screen text-zinc-100 font-sans">
+      <header className="flex justify-between items-center mb-10 border-b border-zinc-800 pb-6">
+        <div className="flex items-center gap-4">
+          <div className={`w-3 h-3 rounded-full ${loggedIn ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]'}`}></div>
+          <h1 className="text-2xl font-bold tracking-tight text-white">
+            AlgoTerminal<span className="text-blue-500 text-3xl">.</span>
+          </h1>
+        </div>
+        <div className="flex items-center gap-4">
+          {loggedIn && (
+            <span className="flex items-center px-3 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full text-xs font-semibold uppercase tracking-wider backdrop-blur-sm">
+              ● System Online
+            </span>
+          )}
           <button
             onClick={handleLogin}
             disabled={loading || loggedIn}
-            style={{
-              ...styles.button,
-              ...(loggedIn ? styles.buttonSuccess : {}),
-            }}
+            className={`px-5 py-2.5 rounded-lg font-medium text-sm transition-all duration-200 ${loggedIn
+              ? 'bg-emerald-600 text-white cursor-default shadow-lg shadow-emerald-900/20'
+              : 'bg-blue-600 hover:bg-blue-500 text-white hover:shadow-lg hover:shadow-blue-900/20 active:translate-y-px'
+              }`}
           >
-            {loggedIn ? "✓ Connected" : "Login Backend"}
+            {loggedIn ? "Connected" : "Connect Broker"}
           </button>
-          {loggedIn && (
-            <span style={styles.statusBadge}>Session Active</span>
-          )}
         </div>
-      </div>
+      </header>
 
       {error && (
-        <div style={styles.errorBox}>
-          {error}
+        <div className="mb-8 p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3">
+          <span className="text-red-500 text-lg">⚠</span>
+          <span className="text-red-400 text-sm font-medium">{error}</span>
         </div>
       )}
 
-      <div style={styles.searchSection}>
-        <div style={styles.searchControls}>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyPress={(e) => e.key === "Enter" && handleSearch()}
-            placeholder="Search instruments..."
-            style={styles.searchInput}
-            disabled={loading}
-          />
-          <select
-            value={searchType}
-            onChange={(e) => setSearchType(e.target.value)}
-            style={styles.select}
-            disabled={loading}
-          >
-            <option value="EQUITY">Stocks</option>
-            <option value="INDEX">Index</option>
-          </select>
-          <button
-            onClick={handleSearch}
-            disabled={loading || !query.trim()}
-            style={styles.button}
-          >
-            {loading ? "Searching..." : "Search"}
-          </button>
-        </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[400px_1fr] gap-8 transition-all duration-300 ease-in-out">
+        {/* Left Column */}
+        <div className="flex flex-col gap-6">
 
-        {results.length > 0 && (
-          <div style={styles.resultsCard}>
-            <h3 style={styles.resultsHeader}>
-              Results ({results.length})
+          {/* Watchlist Section */}
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 shadow-xl backdrop-blur-sm flex flex-col h-[400px]">
+            <h3 className="mb-4 text-lg font-semibold text-zinc-100 flex justify-between items-center">
+              <span>Market Watch</span>
+              <span className="text-xs bg-zinc-800 px-2 py-1 rounded text-zinc-400">{watchlist.length}</span>
             </h3>
-            <div style={styles.resultsList}>
-              {results.map((r) => (
-                <div
-                  key={r.token}
-                  onClick={() => handleSelect(r)}
-                  style={{
-                    ...styles.resultItem,
-                    ...(selected?.token === r.token
-                      ? styles.resultItemSelected
-                      : {}),
-                  }}
-                >
-                  <div style={styles.resultSymbol}>{r.symbol}</div>
-                  <div style={styles.resultMeta}>
-                    {r.name && <span>{r.name}</span>}
-                    <span style={styles.resultExchange}>{r.exch_seg}</span>
-                  </div>
-                </div>
-              ))}
+            <div className="overflow-y-auto flex-1 pr-2 space-y-2 custom-scrollbar">
+              {watchlist.length === 0 ? (
+                <div className="text-zinc-500 text-sm text-center mt-10 italic">Your watchlist is empty.<br />Add symbols from search below.</div>
+              ) : (
+                watchlist.map(item => {
+                  const price = livePrices[item.token];
+                  return (
+                    <div
+                      key={item.token}
+                      className={`flex justify-between items-center p-3 rounded-lg border cursor-pointer transition-all ${selected?.token === item.token ? 'bg-zinc-800 border-zinc-600' : 'bg-zinc-950/30 border-zinc-800/50 hover:bg-zinc-800/50'}`}
+                      onClick={() => { setSelected(item); setLtp(price || null); }}
+                    >
+                      <div>
+                        <div className="font-semibold text-zinc-200 text-sm">{item.symbol}</div>
+                        <div className="text-[10px] text-zinc-500 uppercase">{item.exch_seg}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className={`font-mono font-medium ${price ? 'text-emerald-400' : 'text-zinc-600'}`}>
+                          {price ? `₹${price.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "---.--"}
+                        </div>
+                        <button
+                          className="text-[10px] text-red-500/50 hover:text-red-500 mt-1"
+                          onClick={(e) => { e.stopPropagation(); removeFromWatchlist(item.token); }}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
             </div>
           </div>
-        )}
-      </div>
 
-      {selected && (
-        <div style={styles.selectedCard}>
-          <div style={styles.selectedHeader}>
-            <h2>{selected.symbol}</h2>
-            {selected.name && (
-              <span style={styles.selectedName}>{selected.name}</span>
+          {/* Search Section */}
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 shadow-xl backdrop-blur-sm">
+            <h3 className="mb-4 text-base font-semibold text-zinc-300">Add Instrument</h3>
+            <div className="flex gap-2 mb-4">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyPress={(e) => e.key === "Enter" && handleSearch()}
+                placeholder="Search..."
+                className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100 focus:border-blue-500 outline-none"
+                disabled={loading}
+              />
+              <select
+                value={searchType}
+                onChange={(e) => setSearchType(e.target.value)}
+                disabled={loading}
+                className="w-20 bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-2 text-sm text-zinc-100 outline-none"
+              >
+                <option value="EQUITY">Eq</option>
+                <option value="INDEX">Idx</option>
+              </select>
+            </div>
+            <button
+              onClick={handleSearch}
+              disabled={loading || !query.trim()}
+              className="w-full bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 px-3 py-2 rounded-lg text-sm transition-all"
+            >
+              {loading ? "..." : "Search"}
+            </button>
+
+            {results.length > 0 && (
+              <div className="mt-4 max-h-[200px] overflow-y-auto custom-scrollbar space-y-1">
+                {results.map((r) => (
+                  <div
+                    key={r.token}
+                    className="flex justify-between items-center p-2 rounded hover:bg-zinc-800 transition-all cursor-pointer group"
+                  >
+                    <div onClick={() => setSelected(r)}>
+                      <div className="font-semibold text-zinc-200 text-xs">{r.symbol}</div>
+                      <div className="text-[10px] text-zinc-500">{r.name}</div>
+                    </div>
+                    <button
+                      onClick={() => addToWatchlist(r)}
+                      className="text-xs bg-blue-500/10 text-blue-400 px-2 py-1 rounded border border-blue-500/20 hover:bg-blue-500 hover:text-white transition-all"
+                    >
+                      + Add
+                    </button>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
-          {ltp !== null && (
-            <div style={styles.ltpDisplay}>
-              <span style={styles.ltpLabel}>Last Traded Price</span>
-              <span style={styles.ltpValue}>₹{ltp.toLocaleString("en-IN")}</span>
+        </div>
+
+        {/* Right Column: Details & Option Chain */}
+        <div className="flex flex-col gap-6 min-w-0">
+          {selected ? (
+            <>
+              <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-8 shadow-xl backdrop-blur-md flex flex-wrap justify-between items-end gap-6 relative overflow-hidden group">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 rounded-full blur-3xl -z-10 group-hover:bg-blue-500/10 transition-colors duration-500"></div>
+
+                <div>
+                  <h2 className="text-4xl sm:text-5xl font-bold tracking-tight text-white leading-none mb-2">
+                    {selected.symbol}
+                  </h2>
+                  <div className="flex items-center gap-3 text-zinc-400 text-sm">
+                    <span className="font-medium">{selected.name}</span>
+                    <span className="w-1 h-1 rounded-full bg-zinc-600"></span>
+                    <span className="font-mono text-zinc-500">{selected.exch_seg}</span>
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  <div className="text-sm font-medium text-zinc-500 mb-1 uppercase tracking-wider">Last Traded Price</div>
+                  <div className={`font-mono text-5xl font-bold tracking-tight animate-in fade-in zoom-in ${livePrices[selected.token] ? 'text-emerald-400 drop-shadow-[0_0_15px_rgba(52,211,153,0.2)]' : 'text-zinc-700'}`}>
+                    {livePrices[selected.token] ? `₹${livePrices[selected.token].toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : <span className="animate-pulse">---.--</span>}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-4">
+                <button
+                  onClick={() => setShowOptionChain(!showOptionChain)}
+                  className={`px-6 py-3 rounded-lg font-medium text-sm transition-all duration-200 border ${showOptionChain
+                    ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/20'
+                    : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:bg-zinc-800 hover:border-zinc-600'
+                    }`}
+                >
+                  {showOptionChain ? "Hide Option Chain" : "View Option Chain"}
+                </button>
+                <button className="px-6 py-3 bg-zinc-900 hover:bg-zinc-800 text-emerald-400 border border-zinc-700 hover:border-emerald-500/50 rounded-lg text-sm font-medium transition-all">
+                  Buy Order
+                </button>
+                <button className="px-6 py-3 bg-zinc-900 hover:bg-zinc-800 text-red-400 border border-zinc-700 hover:border-red-500/50 rounded-lg text-sm font-medium transition-all">
+                  Sell Order
+                </button>
+              </div>
+
+              {showOptionChain && (
+                <OptionChain
+                  symbol={normalizeUnderlying(selected)}
+                  spotPrice={ltp}
+                />
+              )}
+            </>
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center bg-zinc-900/30 border-2 border-dashed border-zinc-800 rounded-xl p-12 text-center">
+              <div className="w-16 h-16 bg-zinc-800 rounded-full flex items-center justify-center mb-4">
+                <span className="text-2xl">🔍</span>
+              </div>
+              <h3 className="text-xl font-medium text-zinc-300 mb-2">No Instrument Selected</h3>
+              <p className="text-zinc-500 max-w-sm">Use the search panel on the left to add stocks to your Watchlist.</p>
             </div>
           )}
-          {loading && ltp === null && (
-            <div style={styles.loadingText}>Loading price...</div>
-          )}
-          <button
-            onClick={() => setShowOptionChain(!showOptionChain)}
-            style={{ ...styles.button, ...styles.secondaryButton }}
-          >
-            {showOptionChain ? "Hide" : "View"} Option Chain
-          </button>
         </div>
-      )}
-
-      {showOptionChain && selected && (
-        <OptionChain symbol={normalizeUnderlying(selected)} />
-      )}
+      </div>
     </div>
   );
 }
 
-const styles = {
-  container: {
-    maxWidth: "1200px",
-    margin: "0 auto",
-    padding: "2rem",
-    minHeight: "100vh",
-  },
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: "2rem",
-    paddingBottom: "1.5rem",
-    borderBottom: "2px solid #e5e7eb",
-  },
-  loginSection: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0.75rem",
-  },
-  statusBadge: {
-    padding: "0.375rem 0.75rem",
-    backgroundColor: "#d1fae5",
-    color: "#065f46",
-    borderRadius: "6px",
-    fontSize: "0.875rem",
-    fontWeight: "500",
-  },
-  errorBox: {
-    padding: "0.875rem 1rem",
-    backgroundColor: "#fee2e2",
-    color: "#991b1b",
-    borderRadius: "6px",
-    marginBottom: "1.5rem",
-    border: "1px solid #fecaca",
-  },
-  searchSection: {
-    marginBottom: "2rem",
-  },
-  searchControls: {
-    display: "flex",
-    gap: "0.75rem",
-    marginBottom: "1.5rem",
-    flexWrap: "wrap",
-  },
-  searchInput: {
-    flex: "1",
-    minWidth: "200px",
-  },
-  select: {
-    minWidth: "120px",
-  },
-  button: {
-    padding: "0.625rem 1.25rem",
-  },
-  buttonSuccess: {
-    backgroundColor: "#10b981",
-    cursor: "default",
-  },
-  buttonSuccessHover: {
-    backgroundColor: "#10b981",
-  },
-  secondaryButton: {
-    backgroundColor: "#6b7280",
-    marginTop: "1rem",
-  },
-  resultsCard: {
-    backgroundColor: "white",
-    borderRadius: "8px",
-    padding: "1.5rem",
-    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1)",
-  },
-  resultsHeader: {
-    marginBottom: "1rem",
-    fontSize: "1.125rem",
-    color: "#374151",
-  },
-  resultsList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-    maxHeight: "400px",
-    overflowY: "auto",
-  },
-  resultItem: {
-    padding: "0.875rem 1rem",
-    borderRadius: "6px",
-    cursor: "pointer",
-    transition: "all 0.2s ease",
-    border: "1px solid #e5e7eb",
-  },
-  resultItemSelected: {
-    backgroundColor: "#eef2ff",
-    borderColor: "#4f46e5",
-  },
-  resultSymbol: {
-    fontWeight: "600",
-    color: "#1f2937",
-    marginBottom: "0.25rem",
-  },
-  resultMeta: {
-    display: "flex",
-    gap: "0.75rem",
-    fontSize: "0.875rem",
-    color: "#6b7280",
-  },
-  resultExchange: {
-    padding: "0.125rem 0.5rem",
-    backgroundColor: "#f3f4f6",
-    borderRadius: "4px",
-    fontWeight: "500",
-  },
-  selectedCard: {
-    backgroundColor: "white",
-    borderRadius: "8px",
-    padding: "1.5rem",
-    marginBottom: "1.5rem",
-    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1)",
-  },
-  selectedHeader: {
-    marginBottom: "1rem",
-  },
-  selectedName: {
-    display: "block",
-    fontSize: "0.875rem",
-    color: "#6b7280",
-    marginTop: "0.25rem",
-  },
-  ltpDisplay: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-    padding: "1rem",
-    backgroundColor: "#f9fafb",
-    borderRadius: "6px",
-    marginBottom: "1rem",
-  },
-  ltpLabel: {
-    fontSize: "0.875rem",
-    color: "#6b7280",
-    fontWeight: "500",
-  },
-  ltpValue: {
-    fontSize: "1.75rem",
-    fontWeight: "700",
-    color: "#059669",
-  },
-  loadingText: {
-    color: "#6b7280",
-    fontStyle: "italic",
-    marginBottom: "1rem",
-  },
-};
-
 export default App;
+
+

@@ -2,8 +2,13 @@ const { WebSocketV2 } = require("smartapi-javascript");
 
 let socket = null;
 let isConnected = false;
+let io = null; // Frontend socket.io instance
 
-function initMarketSocket({ jwtToken , feedToken}) {
+function setIo(_io) {
+  io = _io;
+}
+
+function initMarketSocket({ jwtToken, feedToken }) {
   if (socket) return socket;
 
   if (!jwtToken || !feedToken) {
@@ -23,7 +28,10 @@ function initMarketSocket({ jwtToken , feedToken}) {
   });
 
   socket.on("tick", (data) => {
-    console.log("Tick:", data);
+    // console.log("Tick:", data);
+    if (io) {
+      io.emit("tick", data);
+    }
   });
 
   return socket;
@@ -47,5 +55,6 @@ function subscribeTokens({ exchangeType, tokens }) {
 
 module.exports = {
   initMarketSocket,
-  subscribeTokens
+  subscribeTokens,
+  setIo
 };
